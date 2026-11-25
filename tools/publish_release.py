@@ -78,6 +78,12 @@ def main() -> int:
 
     print(f"release: {rel['html_url']}")
     name = os.path.basename(EXE)
+    # An asset with the same name cannot be uploaded twice: drop the old one first, so re-running
+    # this after a fix refreshes the download instead of failing.
+    for a in rel.get("assets", []):
+        if a["name"] == name:
+            api(f"https://api.github.com/repos/{OWNER}/{REPO}/releases/assets/{a['id']}", tok, method="DELETE")
+            print(f"removed the old {name}")
     payload = open(EXE, "rb").read()
     asset = api(
         f"https://uploads.github.com/repos/{OWNER}/{REPO}/releases/{rel['id']}/assets?name={name}",
