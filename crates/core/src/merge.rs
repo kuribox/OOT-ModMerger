@@ -124,19 +124,25 @@ fn merge_nodes(low: &Val, high: &Val, whole_rows: bool, st: &mut Stats) -> Val {
             let kh: Option<Vec<String>> = h.iter().map(|x| x.row_key(ROW_KEYS)).collect();
             match (kl, kh) {
                 (Some(kl), Some(kh)) if l.len() == kl.len() && h.len() == kh.len() => {
-                    // A key may appear in both lists (that is a row both mods have); it must not
-                    // appear twice in the same one, or the rows cannot be matched.
-                    let unique = |keys: &[String]| {
-                        let mut seen = std::collections::HashSet::new();
-                        keys.iter().all(|k| seen.insert(k.clone()))
+                    // A key may repeat inside one list (an actor's Links are all named "Enemy", for
+                    // instance), so rows are matched by key *and* by which time that key appears:
+                    // the second "Enemy" of one file pairs with the second of the other.
+                    let occur = |keys: &[String]| -> Vec<(String, usize)> {
+                        let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+                        let mut out = Vec::with_capacity(keys.len());
+                        for k in keys {
+                            let n = seen.entry(k.as_str()).or_insert(0);
+                            out.push((k.clone(), *n));
+                            *n += 1;
+                        }
+                        out
                     };
-                    if !unique(&kl) || !unique(&kh) {
-                        st.notes.push(format!("{} rows with a repeated key: kept from the last mod", h.len()));
-                        return Val::Arr(h.clone());
-                    }
+                    let (ol, oh) = (occur(&kl), occur(&kh));
+                    let pos: std::collections::HashMap<(String, usize), usize> =
+                        ol.iter().cloned().zip(0..).collect();
                     let mut out = l.clone();
-                    for (k, node) in kh.iter().zip(h.iter()) {
-                        match kl.iter().position(|x| x == k) {
+                    for ((_k, _n), node) in oh.iter().zip(h.iter()) {
+                        match pos.get(&(_k.clone(), *_n)).copied() {
                             Some(i) => {
                                 if whole_rows {
                                     if out[i] != *node {
@@ -289,6 +295,82 @@ fn three_way(vanilla: &[u8], sides: &[&[u8]]) -> (Vec<u8>, usize, usize) {
     (out, runs, conflicts)
 }
 
+
+
+/// Every keyed array of a tree, as `path -> key -> row`, so two trees can be compared row by row.
+fn keyed_rows(
+    v: &Val,
+    path: &str,
+    out: &mut BTreeMap<String, BTreeMap<String, Val>>,
+) {
+    match v {
+        Val::Dict(items) => {
+            for (k, child) in items {
+                keyed_rows(child, &format!("{path}/{k}"), out);
+            }
+        }
+        Val::Arr(items) => {
+            let keys: Vec<Option<String>> = items.iter().map(|x| x.row_key(ROW_KEYS)).collect();
+            if !items.is_empty() && keys.iter().all(|k| k.is_some()) && {
+                let mut seen = std::collections::HashSet::new();
+                keys.iter().flatten().all(|k| seen.insert(k.clone()))
+            } {
+                let mut rows = BTreeMap::new();
+                for (k, item) in keys.into_iter().flatten().zip(items.iter()) {
+                    rows.insert(k, item.clone());
+                }
+                out.insert(path.to_string(), rows);
+            } else {
+                for (i, child) in items.iter().enumerate() {
+                    keyed_rows(child, &format!("{path}[]"), out);
+                    let _ = i;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// What a mod adds to and retunes in a tree, against the game's own copy: (rows it adds,
+/// rows it changes that the game already had).
+fn contribution(game: &Val, theirs: &Val) -> (usize, usize) {
+    let mut base = BTreeMap::new();
+    keyed_rows(game, "", &mut base);
+    let mut mine = BTreeMap::new();
+    keyed_rows(theirs, "", &mut mine);
+    let (mut added, mut retuned) = (0usize, 0usize);
+    for (path, rows) in &mine {
+        let before = base.get(path);
+        for (key, row) in rows {
+            match before.and_then(|b| b.get(key)) {
+                None => added += 1,
+                Some(old) => {
+                    if old != row {
+                        retuned += 1;
+                    }
+                }
+            }
+        }
+    }
+    (added, retuned)
+}
+
+/// Every row of `theirs` that the merged tree does not have: nothing a mod ships may be dropped.
+fn rows_lost(merged: &Val, theirs: &Val) -> usize {
+    let mut have = BTreeMap::new();
+    keyed_rows(merged, "", &mut have);
+    let mut want = BTreeMap::new();
+    keyed_rows(theirs, "", &mut want);
+    let mut lost = 0usize;
+    for (path, rows) in &want {
+        for key in rows.keys() {
+            if have.get(path).and_then(|h| h.get(key)).is_none() {
+                lost += 1;
+            }
+        }
+    }
+    lost
+}
 
 /// What a mod adds to a byml table against the game's own file: new rows in every keyed array and
 /// new keys, a couple of levels down (the GameData list nests its row arrays under `Data`).
@@ -593,15 +675,44 @@ pub fn run_with(
             let (high_data, used, high_z) = unpack(&dicts, &mods[high].romfs.join(rel), kind)?;
             let high_tree = byml::Byml::parse(&high_data)?;
             let mut tree = high_tree.root.clone().ok_or("empty byml")?;
+            let high_root = tree.clone();
             let mut notes: Vec<String> = Vec::new();
             let mut ok = true;
             let mut added = 0;
             let mut values = 0;
+            let vanilla_root = {
+                let p = romfs.join(rel);
+                match unpack(&dicts, &p, kind) {
+                    Ok((d, _, _)) => byml::Byml::parse(&d).ok().and_then(|b| b.root),
+                    Err(_) => None,
+                }
+            };
+            let mut said: Vec<String> = Vec::new();
+            let mut lost_any = 0usize;
+            let mut consider = |name: &str, root: &Val, tree: &Val, said: &mut Vec<String>, lost: &mut usize| {
+                let lost_here = rows_lost(tree, root);
+                *lost += lost_here;
+                match vanilla_root.as_ref() {
+                    Some(game) => {
+                        let (adds, retunes) = contribution(game, root);
+                        let bit = match (adds, retunes) {
+                            (0, 0) => format!("{name}: nothing new"),
+                            (0, r) => format!("{name}: retunes {r}"),
+                            (a, 0) => format!("{name}: +{a}"),
+                            (a, r) => format!("{name}: +{a}, retunes {r}"),
+                        };
+                        said.push(bit);
+                    }
+                    None => said.push(format!("{name}: {} rows", 0)),
+                }
+            };
+            // the high mod, against the game's own file
+            consider(high_name, &high_root, &tree, &mut said, &mut lost_any);
             for low in &owners[..owners.len() - 1] {
                 let (low_data, _, _) = unpack(&dicts, &mods[*low].romfs.join(rel), kind)?;
                 let low_tree = byml::Byml::parse(&low_data)?;
                 let Some(low_root) = low_tree.root.as_ref() else { continue };
-                let (merged_tree, st) = merge_byml(low_root, &tree, kind == "bcett");
+                let (merged_tree, st) = merge_byml(low_root, &tree, false);
                 if !st.unkeyed.is_empty() {
                     notes.extend(st.notes.iter().take(3).cloned());
                     ok = false;
@@ -610,8 +721,13 @@ pub fn run_with(
                 notes.extend(st.notes.iter().take(2).cloned());
                 added += st.rows_added;
                 values += st.values + st.whole_rows;
+                let name = mods[*low].name.clone();
+                consider(&name, low_root, &tree, &mut said, &mut lost_any);
             }
             let _ = ok;
+            if lost_any > 0 {
+                notes.push(format!("{lost_any} rows of a mod are missing from the result"));
+            }
             let data = byml::Byml { version: high_tree.version, big: high_tree.big, root: Some(tree) }.write();
             sizes.push((rel.clone(), data.len()));
             written.push((rel.clone(), pack_like(&data, &dicts, &used, high_z)?));
@@ -619,7 +735,11 @@ pub fn run_with(
             outcome.rows.push(Row {
                 action: "merged",
                 file: rel.clone(),
-                detail: format!("+{added} rows, {values} from {high_name}{}", if notes.is_empty() { String::new() } else { format!(" ({})", notes.join(", ")) }),
+                detail: format!(
+                    "{}; {values} fields merged{}",
+                    said.join(" · "),
+                    if notes.is_empty() { String::new() } else { format!(" ({})", notes.join(", ")) }
+                ),
             });
         } else if kind == "sarc" {
             let (high_data, used, high_z) = unpack(&dicts, &mods[high].romfs.join(rel), kind)?;
