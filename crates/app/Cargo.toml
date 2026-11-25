@@ -11,4 +11,5 @@ path = "src/main.rs"
 modmerge-core = { path = "../core" }
 eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts"] }
 egui = "0.37"
+egui_extras = "0.37"
 rfd = "0.15"

@@ -15,6 +15,8 @@ struct RowView {
     action: &'static str,
     file: String,
     detail: String,
+    /// The mods that ship this file, lowest priority first.
+    owners: Vec<usize>,
 }
 
 struct Job(Result<Outcome, String>);
@@ -234,7 +236,12 @@ impl App {
                     self.rows = o
                         .rows
                         .iter()
-                        .map(|r| RowView { action: r.action, file: r.file.clone(), detail: r.detail.clone() })
+                        .map(|r| RowView {
+                            action: r.action,
+                            file: r.file.clone(),
+                            detail: r.detail.clone(),
+                            owners: o.owners.get(&r.file).cloned().unwrap_or_default(),
+                        })
                         .collect();
                     self.warnings = o.warnings.clone();
                     self.advice = o.advice.clone();
@@ -480,6 +487,16 @@ impl App {
     }
 
     fn conflicts(&mut self, ui: &mut egui::Ui) {
+        use egui_extras::{Column, TableBuilder};
+        let (col_file, col_state, col_detail, winner_l, merged_l, kept_l, none_l) = (
+            self.t("col_file"),
+            self.t("col_state"),
+            self.t("col_detail"),
+            self.t("winner"),
+            self.t("merged"),
+            self.t("kept"),
+            self.t("none_wins"),
+        );
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(self.t("conflicts")).strong().color(theme::GOLD));
             let hint = self.t("filter");
@@ -494,62 +511,127 @@ impl App {
             }
         });
         if !self.warnings.is_empty() {
+            let title = self.t("warn_title");
+            let more = self.t("warn_more");
             egui::Frame::group(ui.style())
                 .fill(theme::WARN_BG)
                 .stroke(egui::Stroke::new(1.0, theme::WARN.gamma_multiply(0.6)))
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new(self.t("warn_title")).strong().color(theme::WARN));
-                    for w in self.warnings.iter().take(5) {
-                        ui.label(egui::RichText::new(format!("- {w}")).small());
+                    ui.label(egui::RichText::new(title).strong().color(theme::WARN));
+                    for w in self.warnings.iter().take(3) {
+                        ui.add(egui::Label::new(egui::RichText::new(format!("- {w}")).small()).truncate())
+                            .on_hover_text(w);
                     }
-                    if self.warnings.len() > 5 {
-                        ui.label(egui::RichText::new(format!("{} {}", self.t("warn_more"), self.warnings.len() - 5)).small());
+                    if self.warnings.len() > 3 {
+                        ui.label(egui::RichText::new(format!("{} {}", more, self.warnings.len() - 3)).small());
                     }
                 });
-            ui.add_space(4.0);
         }
+        if self.rows.is_empty() {
+            let none = self.t("no_conflicts");
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(none).small().color(theme::PARCHMENT.gamma_multiply(0.6)));
+            return;
+        }
+        let rows = self.rows.clone();
         let names: Vec<String> = self.mods.iter().map(|(n, _)| n.clone()).collect();
-        egui::ScrollArea::both().max_height(300.0).id_salt("rows").show(ui, |ui| {
-            egui::Grid::new("rowsgrid").num_columns(3).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
-                ui.strong(self.t("col_file"));
-                ui.strong(self.t("col_what"));
-                ui.strong(self.t("col_detail"));
-                ui.end_row();
-                for row in &self.rows {
-                    if !self.filter.is_empty() && !row.file.to_lowercase().contains(&self.filter.to_lowercase()) {
-                        continue;
-                    }
-                    let (color, label) = if row.action == "merged" {
-                        (theme::OK, self.t("merged"))
-                    } else {
-                        (theme::WARN, self.t("kept"))
-                    };
-                    ui.add(egui::Label::new(egui::RichText::new(&row.file).monospace().small()).truncate());
-                    ui.label(egui::RichText::new(label).color(color).strong());
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Label::new(egui::RichText::new(&row.detail).small()).truncate());
-                        if row.action != "merged" && names.len() > 1 {
-                            let current = self.overrides.get(&row.file).copied().unwrap_or(names.len() - 1);
+        let overrides = self.overrides.clone();
+        let filter = self.filter.to_lowercase();
+        let mut picks: Vec<(String, Option<usize>)> = Vec::new();
+        ui.add_space(4.0);
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .auto_shrink([false, false])
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::initial(400.0).at_least(160.0).clip(true))
+            .column(Column::initial(86.0).at_least(70.0))
+            .column(Column::initial(300.0).at_least(120.0).clip(true))
+            .column(Column::remainder().at_least(190.0))
+            .header(22.0, |mut header| {
+                header.col(|ui| {
+                    ui.strong(col_file);
+                });
+                header.col(|ui| {
+                    ui.strong(col_state);
+                });
+                header.col(|ui| {
+                    ui.strong(col_detail);
+                });
+                header.col(|ui| {
+                    ui.strong(winner_l);
+                });
+            })
+            .body(|mut body| {
+                for row in rows
+                    .iter()
+                    .filter(|r| filter.is_empty() || r.file.to_lowercase().contains(&filter))
+                {
+                    body.row(23.0, |mut tr| {
+                        tr.col(|ui| {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&row.file).monospace().small())
+                                    .truncate(),
+                            )
+                            .on_hover_text(&row.file);
+                        });
+                        tr.col(|ui| {
+                            let (color, label) = if row.action == "merged" {
+                                (theme::OK, merged_l)
+                            } else {
+                                (theme::WARN, kept_l)
+                            };
+                            ui.label(egui::RichText::new(label).color(color).strong().small());
+                        });
+                        tr.col(|ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(&row.detail).small()).truncate())
+                                .on_hover_text(&row.detail);
+                        });
+                        tr.col(|ui| {
+                            if row.action == "merged" || row.owners.len() < 2 {
+                                ui.label(egui::RichText::new("-").small().weak());
+                                return;
+                            }
+                            let current = overrides.get(&row.file).copied();
+                            let text = match current {
+                                Some(i) => names.get(i).cloned().unwrap_or_default(),
+                                None => none_l.to_string(),
+                            };
                             let mut pick = current;
                             egui::ComboBox::from_id_salt(format!("win-{}", row.file))
-                                .selected_text(names.get(current).cloned().unwrap_or_default())
+                                .selected_text(egui::RichText::new(text).small())
                                 .width(200.0)
                                 .show_ui(ui, |ui| {
-                                    for (i, n) in names.iter().enumerate() {
-                                        ui.selectable_value(&mut pick, i, n);
+                                    ui.selectable_value(&mut pick, None, egui::RichText::new(none_l).small());
+                                    for i in &row.owners {
+                                        if let Some(n) = names.get(*i) {
+                                            ui.selectable_value(
+                                                &mut pick,
+                                                Some(*i),
+                                                egui::RichText::new(n).small(),
+                                            );
+                                        }
                                     }
                                 });
                             if pick != current {
-                                self.overrides.insert(row.file.clone(), pick);
-                                self.dirty = true;
+                                picks.push((row.file.clone(), pick));
                             }
-                        }
+                        });
                     });
-                    ui.end_row();
                 }
             });
-        });
+        for (file, pick) in picks {
+            match pick {
+                Some(i) => {
+                    self.overrides.insert(file, i);
+                }
+                None => {
+                    self.overrides.remove(&file);
+                }
+            }
+            self.dirty = true;
+        }
     }
 }
 
@@ -576,15 +658,13 @@ impl eframe::App for App {
             ui.add_space(4.0);
         });
         egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                self.game_card(ui, if self.drop_hint { pointer } else { None });
-                ui.add_space(6.0);
-                self.mods_card(ui);
-                ui.add_space(6.0);
-                self.output_card(ui);
-                ui.add_space(8.0);
-                self.conflicts(ui);
-            });
+            self.game_card(ui, if self.drop_hint { pointer } else { None });
+            ui.add_space(6.0);
+            self.mods_card(ui);
+            ui.add_space(6.0);
+            self.output_card(ui);
+            ui.add_space(8.0);
+            self.conflicts(ui);
         });
     }
 }

@@ -35,6 +35,8 @@ pub struct Outcome {
     pub files: usize,
     pub overlaps: usize,
     pub written: usize,
+    /// For every file in conflict, the mods (their index, lowest priority first) that ship it.
+    pub owners: BTreeMap<String, Vec<usize>>,
 }
 
 struct Stats {
@@ -518,6 +520,7 @@ pub fn run_with(
             continue;
         }
         outcome.overlaps += 1;
+        outcome.owners.insert(rel.clone(), owners.clone());
         if let Some(chosen) = overrides.get(rel) {
             let Some(m) = mods.get(*chosen) else {
                 return Err("an override names a mod that is not in the list".into());
