@@ -29,11 +29,20 @@ Event flows (`*.bfevfl.zs`), logic (`*.ainb`), textures (`*.bntx`), models (`*.b
 layouts, fonts and sounds: they are graphs or packed data with no key to join them on. The last mod's
 copy is used and the report lists every one of them.
 
-## How to use it
+## The window
 
-Open `oot-mod-merge.exe` with no arguments for the window (Spanish and English): set the game's
-`romfs`, drag the mod folders in, reorder them, **Scan conflicts** to see the result without writing,
-**Merge**. Or from a terminal:
+- Spanish and English, dark stone and gold, a triforce in the header.
+- Drag the mod folders in and reorder them with the handle. A folder dropped on the RomFS or Output
+  field fills it; the whole game folder (with `romfs/` and `mods/` beside each other) fills both.
+- **Scan conflicts** writes nothing; **Merge** writes the overlay and finishes with a modal that says
+  what was done (or why it failed).
+- The conflict table has resizable columns and sorts from its headers; the files still in conflict are
+  on top by default. A file that cannot be merged can be handed to any of the mods that ship it, or to
+  nobody, which leaves it to the load order.
+- It remembers the paths, the name, the flags, the mods in order and the per-file choices in
+  `%APPDATA%\OOT-ModMerge\config.txt`.
+
+Or from a terminal:
 
 ```
 oot-mod-merge.exe merge --romfs <game>/romfs --out <game>/mods --name zzzzzz-merged <mod>... 
