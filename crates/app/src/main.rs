@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod config;
 mod gui;
 mod i18n;
 mod theme;

@@ -50,7 +50,13 @@ For a recompiled game the mods live in `<game>/mods/<name>/romfs`; put the merge
 name that sorts after the others (`zzzzzz-merged`) and it wins for the files it carries.
 
 In the window: drag the mod folders in, reorder them with the handle, press **Scan conflicts** to see
-what would happen without writing anything, and **Merge** to write it. Text in Spanish and English.
+what would happen without writing anything, and **Merge** to write it. Dropping a folder on the RomFS
+or Output field puts it there; dropping the whole game folder (the one with `romfs/` and `mods/` beside
+each other) fills both. Text in Spanish and English.
+
+The window remembers what it was given — the two paths, the name, the flags, the mods in their order
+and any per-file choice — in `%APPDATA%\OOT-ModMerge\config.txt`, a plain `key=value` file that can be
+edited by hand.
 
 ## Building
 

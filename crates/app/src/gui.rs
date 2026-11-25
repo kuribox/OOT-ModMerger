@@ -42,28 +42,58 @@ pub struct App {
     rx: Option<Receiver<Job>>,
     drag_from: Option<usize>,
     drop_hint: bool,
+    dirty: bool,
+    romfs_rect: Option<egui::Rect>,
+    out_rect: Option<egui::Rect>,
 }
 
 impl Default for App {
     fn default() -> Self {
-        let lang = Lang::from_system();
+        let saved = crate::config::Config::load();
+        let lang = match saved.lang.as_str() {
+            "es" => Lang::Es,
+            "en" => Lang::En,
+            _ => Lang::from_system(),
+        };
+        let mods: Vec<(String, String)> = saved
+            .mods
+            .iter()
+            .map(|p| {
+                let name = Path::new(p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.clone());
+                (name, p.clone())
+            })
+            .collect();
+        let overrides = saved
+            .wins
+            .iter()
+            .filter_map(|(file, who)| {
+                let idx = mods.iter().position(|(n, _)| n == who)?;
+                Some((file.clone(), idx))
+            })
+            .collect();
         Self {
             lang,
-            romfs: String::new(),
-            out: String::new(),
-            name: "zzzz-merged".to_string(),
-            all: false,
-            mods: Vec::new(),
+            romfs: saved.romfs,
+            out: saved.out,
+            name: if saved.name.is_empty() { "zzzzzz-merged".to_string() } else { saved.name },
+            all: saved.all,
+            mods,
             rows: Vec::new(),
             warnings: Vec::new(),
             advice: None,
             summary: i18n::t(lang, "drop_hint").to_string(),
             filter: String::new(),
-            overrides: BTreeMap::new(),
+            overrides,
             busy: false,
             rx: None,
             drag_from: None,
             drop_hint: false,
+            dirty: false,
+            romfs_rect: None,
+            out_rect: None,
         }
     }
 }
@@ -73,6 +103,73 @@ impl App {
         i18n::t(self.lang, key)
     }
 
+    /// Where a dropped folder belongs: the field it was dropped on, else what it looks like (a mod has
+    /// a romfs/ inside, a game has romfs/ and mods/, the game's RomFS has Pack/ZsDic.pack.zs).
+    fn drop_folder(&mut self, p: PathBuf, pointer: Option<egui::Pos2>) {
+        let over = |rect: &Option<egui::Rect>| match (rect, pointer) {
+            (Some(r), Some(q)) => r.contains(q),
+            _ => false,
+        };
+        let romfs_like = p.join("Pack").join("ZsDic.pack.zs").is_file();
+        let path = p.display().to_string();
+        if over(&self.romfs_rect) || (romfs_like && self.romfs.trim().is_empty()) {
+            self.romfs = path;
+            self.dirty = true;
+            return;
+        }
+        if over(&self.out_rect) {
+            self.out = path;
+            self.dirty = true;
+            return;
+        }
+        if p.join("romfs").is_dir() && p.join("mods").is_dir() {
+            self.romfs = p.join("romfs").display().to_string();
+            self.out = p.join("mods").display().to_string();
+            self.dirty = true;
+            return;
+        }
+        if romfs_like {
+            self.romfs = path;
+            self.dirty = true;
+            return;
+        }
+        if p.join("romfs").is_dir() {
+            self.add(p);
+            return;
+        }
+        if self.out.trim().is_empty() {
+            self.out = path;
+            self.dirty = true;
+        } else {
+            self.add(p);
+        }
+    }
+
+    fn save(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        let names: Vec<String> = self.mods.iter().map(|(n, _)| n.clone()).collect();
+        let cfg = crate::config::Config {
+            lang: match self.lang {
+                Lang::Es => "es".to_string(),
+                Lang::En => "en".to_string(),
+            },
+            romfs: self.romfs.clone(),
+            out: self.out.clone(),
+            name: self.name.clone(),
+            all: self.all,
+            mods: self.mods.iter().map(|(_, p)| p.clone()).collect(),
+            wins: self
+                .overrides
+                .iter()
+                .filter_map(|(file, i)| names.get(*i).map(|n| (file.clone(), n.clone())))
+                .collect(),
+        };
+        cfg.save();
+        self.dirty = false;
+    }
+
     fn add(&mut self, path: PathBuf) {
         let name = path
             .file_name()
@@ -80,6 +177,7 @@ impl App {
             .unwrap_or_else(|| path.display().to_string());
         if !self.mods.iter().any(|(_, p)| *p == path.display().to_string()) {
             self.mods.push((name, path.display().to_string()));
+            self.dirty = true;
         }
     }
 
@@ -178,6 +276,7 @@ impl App {
                         for l in Lang::all() {
                             if ui.selectable_value(&mut self.lang, l, l.code()).clicked() {
                                 self.summary = i18n::t(l, "drop_hint").to_string();
+                                self.dirty = true;
                             }
                         }
                     })
@@ -189,33 +288,43 @@ impl App {
         ui.separator();
     }
 
-    fn game_card(&mut self, ui: &mut egui::Ui) {
+    fn game_card(&mut self, ui: &mut egui::Ui, hot: Option<egui::Pos2>) {
+        let (l_romfs, l_out, browse, t_romfs, t_out) =
+            (self.t("romfs"), self.t("output"), self.t("browse"), self.t("pick_romfs"), self.t("pick_out"));
+        let missing = self.t("missing_path");
         egui::Frame::group(ui.style())
             .fill(theme::PANEL)
             .stroke(egui::Stroke::new(1.0, theme::GOLD_DIM))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
                 ui.label(egui::RichText::new(self.t("game")).strong().color(theme::GOLD));
-                egui::Grid::new("game").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
-                    ui.label(self.t("romfs"));
-                    let hint = self.t("romfs_hint");
-                    ui.add(egui::TextEdit::singleline(&mut self.romfs).hint_text(hint).desired_width(f32::INFINITY));
-                    if ui.button(self.t("browse")).clicked() {
-                        if let Some(d) = rfd::FileDialog::new().set_title(self.t("pick_romfs")).pick_folder() {
-                            self.romfs = d.display().to_string();
-                        }
+                let mut changed = false;
+                let over = |rect: &Option<egui::Rect>| match (rect, hot) {
+                    (Some(r), Some(q)) => r.contains(q),
+                    _ => false,
+                };
+                let (hot_romfs, hot_out) = (over(&self.romfs_rect), over(&self.out_rect));
+                let mut rects = Vec::new();
+                for (label, value, title, is_hot) in [
+                    (l_romfs, &mut self.romfs, t_romfs, hot_romfs),
+                    (l_out, &mut self.out, t_out, hot_out),
+                ] {
+                    let (typed, picked, rect) = path_row(ui, label, value, browse, title, is_hot);
+                    rects.push(rect);
+                    if let Some(d) = picked {
+                        *value = d;
+                        changed = true;
                     }
-                    ui.end_row();
-                    ui.label(self.t("output"));
-                    let hint = self.t("out_hint");
-                    ui.add(egui::TextEdit::singleline(&mut self.out).hint_text(hint).desired_width(f32::INFINITY));
-                    if ui.button(self.t("browse")).clicked() {
-                        if let Some(d) = rfd::FileDialog::new().set_title(self.t("pick_out")).pick_folder() {
-                            self.out = d.display().to_string();
-                        }
+                    changed |= typed;
+                    if !value.trim().is_empty() && !Path::new(value.trim()).is_dir() {
+                        ui.label(egui::RichText::new(format!("{label}: {missing}")).small().color(theme::WARN));
                     }
-                    ui.end_row();
-                });
+                }
+                if changed {
+                    self.dirty = true;
+                }
+                self.romfs_rect = rects.first().copied();
+                self.out_rect = rects.get(1).copied();
             });
     }
 
@@ -274,12 +383,15 @@ impl App {
                                     *handle_resp = Some(handle);
                                     ui.label(egui::RichText::new(format!("{}", i + 1)).monospace().color(theme::GOLD));
                                     ui.label(egui::RichText::new(&self.mods[i].0).strong());
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(&self.mods[i].1).monospace().small().color(theme::PARCHMENT.gamma_multiply(0.55)),
-                                        )
-                                        .truncate(),
-                                    );
+                                    let gone = !Path::new(&self.mods[i].1).is_dir();
+                                    let color = if gone { theme::WARN } else { theme::PARCHMENT.gamma_multiply(0.55) };
+                                    let mut label =
+                                        egui::RichText::new(&self.mods[i].1).monospace().small().color(color);
+                                    if gone {
+                                        label = label.strikethrough();
+                                    }
+                                    ui.add(egui::Label::new(label).truncate())
+                                        .on_hover_text(self.mods[i].1.clone());
                                     let (up, down, remove) =
                                         (self.t("up"), self.t("down"), self.t("remove"));
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -308,13 +420,19 @@ impl App {
                     }
                 });
                 match action {
-                    Some(Action::Swap(a, b)) => self.mods.swap(a, b),
+                    Some(Action::Swap(a, b)) => {
+                        self.mods.swap(a, b);
+                        self.dirty = true;
+                    }
                     Some(Action::Remove(i)) => {
                         self.mods.remove(i);
+                        self.overrides.clear();
+                        self.dirty = true;
                     }
                     Some(Action::Move(from, to)) => {
                         let m = self.mods.remove(from);
                         self.mods.insert(to.min(self.mods.len()), m);
+                        self.dirty = true;
                     }
                     None => {}
                 }
@@ -424,6 +542,7 @@ impl App {
                                 });
                             if pick != current {
                                 self.overrides.insert(row.file.clone(), pick);
+                                self.dirty = true;
                             }
                         }
                     });
@@ -437,15 +556,18 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
+        self.save();
         let ctx = ui.ctx().clone();
         let dropped: Vec<PathBuf> =
             ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         for p in dropped {
             if p.is_dir() {
-                self.add(p);
+                self.drop_folder(p, pointer);
             }
         }
-        self.drop_hint = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        self.drop_hint = hovering;
 
         egui::Panel::top("head").show(ui, |ui| self.header(ui));
         egui::Panel::bottom("foot").show(ui, |ui| {
@@ -455,7 +577,7 @@ impl eframe::App for App {
         });
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                self.game_card(ui);
+                self.game_card(ui, if self.drop_hint { pointer } else { None });
                 ui.add_space(6.0);
                 self.mods_card(ui);
                 ui.add_space(6.0);
@@ -465,6 +587,42 @@ impl eframe::App for App {
             });
         });
     }
+}
+
+/// A labelled path field that takes the whole width of the card, so a long path can be read, with the
+/// whole of it also on hover.
+fn path_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    browse: &str,
+    title: &str,
+    hot: bool,
+) -> (bool, Option<String>, egui::Rect) {
+    ui.horizontal(|ui| {
+        ui.add_sized([72.0, 18.0], egui::Label::new(label));
+        let room = (ui.available_width() - 86.0).max(200.0);
+        let resp = ui.add(egui::TextEdit::singleline(value).desired_width(room).font(egui::TextStyle::Monospace));
+        let typed = resp.changed();
+        if hot {
+            ui.painter().rect_stroke(
+                resp.rect.expand(2.0),
+                6,
+                egui::Stroke::new(2.0, theme::GOLD),
+                egui::StrokeKind::Outside,
+            );
+        }
+        let rect = resp.rect;
+        let full = value.clone();
+        resp.on_hover_text(full);
+        let picked = if ui.button(browse).clicked() {
+            rfd::FileDialog::new().set_title(title).pick_folder().map(|d| d.display().to_string())
+        } else {
+            None
+        };
+        (typed, picked, rect)
+    })
+    .inner
 }
 
 fn existing(path: &str) -> Option<PathBuf> {
@@ -489,4 +647,38 @@ pub fn main() -> eframe::Result<()> {
             Ok(Box::<App>::default())
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("oot-mod-merge-drop-test").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_dropped_folder_lands_where_it_belongs() {
+        let game = scratch("game");
+        std::fs::create_dir_all(game.join("romfs").join("Pack")).unwrap();
+        std::fs::write(game.join("romfs").join("Pack").join("ZsDic.pack.zs"), b"x").unwrap();
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        let one_mod = scratch("one-mod");
+        std::fs::create_dir_all(one_mod.join("romfs").join("Banc")).unwrap();
+
+        // the whole game folder fills both fields
+        let mut app = App::default();
+        app.mods.clear();
+        app.drop_folder(game.clone(), None);
+        assert_eq!(app.romfs, game.join("romfs").display().to_string());
+        assert_eq!(app.out, game.join("mods").display().to_string());
+
+        // a mod folder joins the list
+        app.drop_folder(one_mod.clone(), None);
+        assert_eq!(app.mods.len(), 1);
+        assert_eq!(app.mods[0].0, "one-mod");
+    }
 }
