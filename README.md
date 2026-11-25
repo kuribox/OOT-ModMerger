@@ -11,11 +11,23 @@ which ones it cannot combine.
 Everything is decided by the format of the file and by comparing it with the game's own (vanilla) copy
 from `--romfs`; no rule knows about a particular mod.
 
+![The window](docs/capturas/ventana-0.0.2-alpha.png)
+
+**How to use it:** see the step-by-step guide in [`docs/USAGE.md`](docs/USAGE.md).
+
+## Tested with
+
+It has been tried with mods such as **Hyrule Survivors**, **Super Hero Boost** (OcarinaTweaks),
+**Playable Malon** and a few others, and the results were good. It is an **alpha**: the merge of a file
+is checked by reading it back, but **I cannot promise it works with every mod or every combination**.
+Keep your originals, read `MERGE-REPORT.md`, and test in the game before trusting a merge. Event
+flows, textures, models and sounds are not merged (see below).
+
 ## The rule per format
 
 | files | what happens |
 |---|---|
-| `Banc/**/*.bcett.byml.zs` | **merged**: actors, AI groups, rails, placement groups and the game-data table are matched by their own key (`Hash`, `GroupGUID`, `PlgGuid`) and unioned. An actor two mods changed differently is taken whole from the mod listed last (a field-wise mix of two placements is not a placement). |
+| `Banc/**/*.bcett.byml.zs` | **merged**: actors, AI groups, rails, placement groups and the game-data table are matched by their own key (`Hash`, `GroupGUID`, `PlgGuid`) and unioned. An actor both mods changed is merged field by field: what only one mod changed is kept, and a field both set differently comes from the mod listed last. |
 | `*rsizetable*` | **merged**: highest value per entry over every mod's table, then raised for the files this merge grew so a bigger file still fits. |
 | `*.game__*.bgyml`, plain `.byml` | **merged**: dictionaries are unioned, keyed rows matched, a scalar two mods set differently comes from the last mod; unkeyed lists of values are unioned, an unkeyed list of records is kept from the last mod and said so. |
 | `*.sarc.zs` (the `Mals` text packs) | **merged**: entries unioned by name, so each mod's text edits survive. |
@@ -85,3 +97,9 @@ crates/app/src/theme.rs     its palette and the triforce it draws
 docs/GAMEDATA.md            what the GameData list is and how two of them are joined
 tools/make_release.py       builds and copies the exe into releases/
 ```
+
+## My other mod
+
+**Super Hero Boost**, a gameplay mod for the Ocarina of Time remake (stamina, button mapping, health bars,
+enemy options and more) with its own configuration app:
+[github.com/kuribox/OOT-SuperHeroBoostMod](https://github.com/kuribox/OOT-SuperHeroBoostMod)
