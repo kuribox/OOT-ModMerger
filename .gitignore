@@ -1,0 +1,18 @@
+# Cargo's build output (hundreds of MB, rebuilt on demand)
+/target/
+/target-dev/
+
+# release binaries: they go to the GitHub release as assets, they are not committed
+/releases/
+
+# Windows and editor leftovers
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.zip
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~
