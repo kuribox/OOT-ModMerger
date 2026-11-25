@@ -10,6 +10,24 @@ use modmerge_core::merge::{self, Mod, Outcome};
 use crate::i18n::{self, Lang};
 use crate::theme;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortBy {
+    File,
+    State,
+    Detail,
+}
+
+/// Which of two rows comes first: the conflict state ranks 0, a merge 1, so the default ("state,
+/// ascending") leaves the files that still need a decision on top.
+fn row_order(a: &RowView, b: &RowView, by: SortBy) -> std::cmp::Ordering {
+    let rank = |r: &RowView| if r.action == "kept" { 0 } else { 1 };
+    match by {
+        SortBy::File => a.file.cmp(&b.file),
+        SortBy::Detail => a.detail.cmp(&b.detail),
+        SortBy::State => rank(a).cmp(&rank(b)).then_with(|| a.file.cmp(&b.file)),
+    }
+}
+
 #[derive(Clone)]
 struct RowView {
     action: &'static str,
@@ -20,6 +38,13 @@ struct RowView {
 }
 
 struct Job(Result<Outcome, String>);
+
+#[derive(Clone)]
+struct Modal {
+    title: String,
+    body: String,
+    error: bool,
+}
 
 enum Action {
     Swap(usize, usize),
@@ -47,6 +72,10 @@ pub struct App {
     dirty: bool,
     romfs_rect: Option<egui::Rect>,
     out_rect: Option<egui::Rect>,
+    sort_by: SortBy,
+    sort_asc: bool,
+    writes: bool,
+    modal: Option<Modal>,
 }
 
 impl Default for App {
@@ -96,6 +125,10 @@ impl Default for App {
             dirty: false,
             romfs_rect: None,
             out_rect: None,
+            sort_by: SortBy::State,
+            sort_asc: true,
+            writes: false,
+            modal: None,
         }
     }
 }
@@ -217,6 +250,7 @@ impl App {
             return;
         }
         let (name, all, overrides) = (self.name.clone(), self.all, self.overrides.clone());
+        self.writes = write;
         let (tx, rx) = channel();
         self.rx = Some(rx);
         self.busy = true;
@@ -259,8 +293,22 @@ impl App {
                         "{} {} · {} {}: {} merged, {} kept{}",
                         o.files, self.t("files"), o.overlaps, self.t("in_conflict"), o.merged, o.kept, written
                     );
+                    if self.writes && o.written > 0 {
+                        self.modal = Some(Modal {
+                            title: self.t("done_title").to_string(),
+                            body: self.summary.clone(),
+                            error: false,
+                        });
+                    }
                 }
-                Err(e) => self.summary = format!("{}: {e}", self.t("error")),
+                Err(e) => {
+                    self.summary = format!("{}: {e}", self.t("error"));
+                    self.modal = Some(Modal {
+                        title: self.t("error_title").to_string(),
+                        body: e,
+                        error: true,
+                    });
+                }
             }
         }
     }
@@ -539,6 +587,20 @@ impl App {
         let overrides = self.overrides.clone();
         let filter = self.filter.to_lowercase();
         let mut picks: Vec<(String, Option<usize>)> = Vec::new();
+        let mut new_sort: Option<SortBy> = None;
+        let (sort_by, sort_asc) = (self.sort_by, self.sort_asc);
+        let mut view: Vec<&RowView> = rows
+            .iter()
+            .filter(|r| filter.is_empty() || r.file.to_lowercase().contains(&filter))
+            .collect();
+        view.sort_by(|a, b| {
+            let ord = row_order(a, b, sort_by);
+            if sort_asc {
+                ord
+            } else {
+                ord.reverse()
+            }
+        });
         ui.add_space(4.0);
         TableBuilder::new(ui)
             .striped(true)
@@ -550,24 +612,47 @@ impl App {
             .column(Column::initial(300.0).at_least(120.0).clip(true))
             .column(Column::remainder().at_least(190.0))
             .header(22.0, |mut header| {
+                let arrow = |k: SortBy| {
+                    if k == sort_by {
+                        if sort_asc {
+                            " ^"
+                        } else {
+                            " v"
+                        }
+                    } else {
+                        ""
+                    }
+                };
                 header.col(|ui| {
-                    ui.strong(col_file);
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new(format!("{col_file}{}", arrow(SortBy::File))).strong()).frame(false))
+                        .clicked()
+                    {
+                        new_sort = Some(SortBy::File);
+                    }
                 });
                 header.col(|ui| {
-                    ui.strong(col_state);
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new(format!("{col_state}{}", arrow(SortBy::State))).strong()).frame(false))
+                        .clicked()
+                    {
+                        new_sort = Some(SortBy::State);
+                    }
                 });
                 header.col(|ui| {
-                    ui.strong(col_detail);
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new(format!("{col_detail}{}", arrow(SortBy::Detail))).strong()).frame(false))
+                        .clicked()
+                    {
+                        new_sort = Some(SortBy::Detail);
+                    }
                 });
                 header.col(|ui| {
                     ui.strong(winner_l);
                 });
             })
             .body(|mut body| {
-                for row in rows
-                    .iter()
-                    .filter(|r| filter.is_empty() || r.file.to_lowercase().contains(&filter))
-                {
+                for row in view.iter() {
                     body.row(23.0, |mut tr| {
                         tr.col(|ui| {
                             ui.add(
@@ -621,6 +706,14 @@ impl App {
                     });
                 }
             });
+        if let Some(k) = new_sort {
+            if k == self.sort_by {
+                self.sort_asc = !self.sort_asc;
+            } else {
+                self.sort_by = k;
+                self.sort_asc = true;
+            }
+        }
         for (file, pick) in picks {
             match pick {
                 Some(i) => {
@@ -650,6 +743,35 @@ impl eframe::App for App {
             }
         }
         self.drop_hint = hovering;
+
+        if let Some(modal) = self.modal.clone() {
+            let ok = self.t("ok");
+            let mut close = false;
+            let title = egui::RichText::new(&modal.title)
+                .color(if modal.error { theme::WARN } else { theme::OK })
+                .strong();
+            egui::Window::new(title)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .collapsible(false)
+                .resizable(false)
+                .min_width(480.0)
+                .show(ui.ctx(), |ui| {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(&modal.body).color(theme::PARCHMENT));
+                    ui.add_space(10.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new(ok).strong().color(theme::BG)).fill(theme::GOLD))
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.modal = None;
+            }
+        }
 
         egui::Panel::top("head").show(ui, |ui| self.header(ui));
         egui::Panel::bottom("foot").show(ui, |ui| {
@@ -738,6 +860,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn row(action: &'static str, file: &str) -> RowView {
+        RowView { action, file: file.to_string(), detail: String::new(), owners: Vec::new() }
+    }
+
+    #[test]
+    fn conflicts_come_first_and_a_header_sorts_by_name() {
+        let mut rows = vec![
+            row("merged", "Banc/A.bcett.byml.zs"),
+            row("kept", "Event/EventFlow/WarpEvent.bfevfl.zs"),
+            row("merged", "GameData/GameDataList.Product.110.byml.zs"),
+        ];
+        rows.sort_by(|a, b| row_order(a, b, SortBy::State));
+        assert_eq!(rows[0].action, "kept", "the conflict is on top by default");
+        rows.sort_by(|a, b| row_order(a, b, SortBy::File));
+        assert_eq!(rows[0].file, "Banc/A.bcett.byml.zs");
+        assert_eq!(rows[2].file, "GameData/GameDataList.Product.110.byml.zs");
+    }
+
+    #[test]
+    fn a_finished_merge_announces_itself_and_a_scan_does_not() {
+        let mut app = App::default();
+        let outcome = || Outcome { files: 10, overlaps: 3, merged: 2, kept: 1, written: 1, ..Default::default() };
+
+        // scanning writes nothing, so it says nothing
+        let (tx, rx) = channel();
+        app.rx = Some(rx);
+        app.writes = false;
+        tx.send(Job(Ok(outcome()))).unwrap();
+        app.poll();
+        assert!(app.modal.is_none(), "a scan does not pop up");
+
+        // merging does
+        let (tx, rx) = channel();
+        app.rx = Some(rx);
+        app.writes = true;
+        tx.send(Job(Ok(outcome()))).unwrap();
+        app.poll();
+        let modal = app.modal.clone().expect("the merge announces itself");
+        assert!(!modal.error);
+        assert!(modal.body.contains("10"));
+
+        // and a failure says why
+        let (tx, rx) = channel();
+        app.rx = Some(rx);
+        tx.send(Job(Err("ZsDic.pack.zs: not found".to_string()))).unwrap();
+        app.poll();
+        let modal = app.modal.clone().expect("the failure announces itself");
+        assert!(modal.error);
+        assert!(modal.body.contains("ZsDic"));
     }
 
     #[test]

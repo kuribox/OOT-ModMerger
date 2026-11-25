@@ -110,6 +110,12 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "none_wins") => "none (the last mod wins)",
         (Lang::Es, "winner") => "gana",
         (Lang::En, "winner") => "winner",
+        (Lang::Es, "done_title") => "Fusion completada",
+        (Lang::En, "done_title") => "Merge finished",
+        (Lang::Es, "error_title") => "No se pudo fusionar",
+        (Lang::En, "error_title") => "The merge failed",
+        (Lang::Es, "ok") => "Vale",
+        (Lang::En, "ok") => "OK",
         (Lang::Es, "no_conflicts") => "sin conflictos: nada que decidir",
         (Lang::En, "no_conflicts") => "no conflicts: nothing to decide",
 
