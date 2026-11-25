@@ -1,4 +1,4 @@
-"""Create the 0.0.1-alpha GitHub release and attach the exe.
+"""Create the GitHub release of the version in crates/app/Cargo.toml and attach the exe.
 
 Needs a token with `repo`: it is read from git's own credential store for github.com, so nothing is
 typed or printed here.
@@ -15,11 +15,21 @@ import urllib.request
 
 OWNER = "kuribox"
 REPO = "OOT-ModMerger"
-TAG = "v0.0.1-alpha"
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(ROOT, "releases", "oot-mod-merge-0.0.1-alpha.exe")
-NOTES = os.path.join(ROOT, "docs", "RELEASE-0.0.1-alpha.md")
+
+
+def _version() -> str:
+    for line in open(os.path.join(ROOT, "crates", "app", "Cargo.toml"), encoding="utf-8"):
+        if line.startswith("version"):
+            return line.split('"')[1]
+    raise SystemExit("no version in crates/app/Cargo.toml")
+
+
+VERSION = _version()
+TAG = f"v{VERSION}"
+EXE = os.path.join(ROOT, "releases", f"oot-mod-merge-{VERSION}.exe")
+NOTES = os.path.join(ROOT, "docs", f"RELEASE-{VERSION}.md")
 
 
 def token() -> str:
@@ -60,7 +70,7 @@ def main() -> int:
             json.dumps(
                 {
                     "tag_name": TAG,
-                    "name": "0.0.1-alpha",
+                    "name": VERSION,
                     "body": body,
                     "draft": False,
                     "prerelease": True,
