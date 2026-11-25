@@ -219,6 +219,21 @@ impl App {
             });
     }
 
+    /// Three ruled lines that mean "drag me": drawn, because the font has no glyph for it.
+    fn drag_handle(&self, ui: &mut egui::Ui) -> egui::Response {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(14.0, 18.0), egui::Sense::drag());
+        let color = if resp.hovered() { theme::GOLD } else { theme::GOLD_DIM };
+        let painter = ui.painter();
+        for i in 0..3 {
+            let y = rect.center().y + (i as f32 - 1.0) * 5.0;
+            painter.line_segment(
+                [egui::pos2(rect.left() + 2.0, y), egui::pos2(rect.right() - 2.0, y)],
+                egui::Stroke::new(1.6, color),
+            );
+        }
+        resp.on_hover_text(self.t("drag")).on_hover_cursor(egui::CursorIcon::Grab)
+    }
+
     fn mods_card(&mut self, ui: &mut egui::Ui) {
         let stroke = if self.drop_hint {
             egui::Stroke::new(2.0, theme::GOLD)
@@ -255,10 +270,7 @@ impl App {
                             .show(ui, |ui| {
                                 let handle_resp = &mut handle_resp;
                                 ui.horizontal(|ui| {
-                                    let handle = ui.add(
-                                        egui::Label::new(egui::RichText::new("⣿").color(theme::GOLD_DIM))
-                                            .sense(egui::Sense::drag()),
-                                    );
+                                    let handle = self.drag_handle(ui);
                                     *handle_resp = Some(handle);
                                     ui.label(egui::RichText::new(format!("{}", i + 1)).monospace().color(theme::GOLD));
                                     ui.label(egui::RichText::new(&self.mods[i].0).strong());
@@ -268,14 +280,16 @@ impl App {
                                         )
                                         .truncate(),
                                     );
+                                    let (up, down, remove) =
+                                        (self.t("up"), self.t("down"), self.t("remove"));
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.small_button("✕").clicked() {
+                                        if ui.small_button(remove).clicked() {
                                             action = Some(Action::Remove(i));
                                         }
-                                        if ui.small_button("↓").clicked() && i + 1 < self.mods.len() {
+                                        if ui.add_enabled(i + 1 < self.mods.len(), egui::Button::new(down).small()).clicked() {
                                             action = Some(Action::Swap(i, i + 1));
                                         }
-                                        if ui.small_button("↑").clicked() && i > 0 {
+                                        if ui.add_enabled(i > 0, egui::Button::new(up).small()).clicked() {
                                             action = Some(Action::Swap(i, i - 1));
                                         }
                                     });
@@ -338,7 +352,7 @@ impl App {
                 ui.add_space(2.0);
                 match &self.advice {
                     Some(a) => {
-                        ui.label(egui::RichText::new(format!("⚠ {a}")).color(theme::WARN));
+                        ui.label(egui::RichText::new(format!("{} {a}", self.t("warn_prefix"))).color(theme::WARN));
                     }
                     None => {
                         ui.label(egui::RichText::new(self.t("name_hint")).small().color(theme::PARCHMENT.gamma_multiply(0.6)));
@@ -369,7 +383,7 @@ impl App {
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new(self.t("warn_title")).strong().color(theme::WARN));
                     for w in self.warnings.iter().take(5) {
-                        ui.label(egui::RichText::new(format!("• {w}")).small());
+                        ui.label(egui::RichText::new(format!("- {w}")).small());
                     }
                     if self.warnings.len() > 5 {
                         ui.label(egui::RichText::new(format!("{} {}", self.t("warn_more"), self.warnings.len() - 5)).small());
